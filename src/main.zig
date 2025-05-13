@@ -11,14 +11,97 @@ const HEIGHT = 600;
 const TARGET_FPS = 60;
 ///(milliseconds per frame)
 const TARGET_FRAME_TIME_MS = 1000 / TARGET_FPS;
+const MOVE_SPEED = 5.0;
 
 var global_running: bool = true;
 var global_paused: bool = false;
+
+pub const Player = struct {
+    x: f32,
+    y: f32,
+    color: c.SDL_Color,
+    moving: struct {
+        up: bool,
+        down: bool,
+        left: bool,
+        right: bool,
+    },
+
+    pub fn init(allocator: std.mem.Allocator, x: f32, y: f32, color: c.SDL_Color) !*Player {
+        const self = try allocator.create(Player);
+        self.*.x = x;
+        self.*.y = y;
+        self.*.color = color;
+        self.*.moving = .{
+            .up = false,
+            .down = false,
+            .left = false,
+            .right = false,
+        };
+
+        return self;
+    }
+
+    pub fn deinit(self: *Player, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+
+    pub fn process_input(self: *Player, keycode: c.SDL_Keycode, is_down: bool) void {
+        switch (keycode) {
+            c.SDLK_UP, c.SDLK_W => {
+                self.moving.up = is_down;
+            },
+            c.SDLK_DOWN, c.SDLK_S => {
+                self.moving.down = is_down;
+            },
+            c.SDLK_LEFT, c.SDLK_A => {
+                self.moving.left = is_down;
+            },
+            c.SDLK_RIGHT, c.SDLK_D => {
+                self.moving.right = is_down;
+            },
+            else => {},
+        }
+    }
+
+    pub fn update_position(self: *Player) void {
+        if(self.moving.up) {
+            self.y -= MOVE_SPEED;
+        }
+        if(self.moving.down) {
+            self.y += MOVE_SPEED;
+        }
+        if(self.moving.left) {
+            self.x -= MOVE_SPEED;
+        }
+        if(self.moving.right) {
+            self.x += MOVE_SPEED;
+        }
+    }
+};
+
+pub const State = struct {
+    player: *Player,
+
+    pub fn init(allocator: std.mem.Allocator, player: *Player) !*State {
+        const self = try allocator.create(State);
+        self.*.player = player;
+
+        return self;
+    }
+
+    pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.player.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+};
 
 pub const Game = struct {
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
+    state: *State,
 
     pub fn init(allocator: std.mem.Allocator) !Game {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO)) {
@@ -43,43 +126,69 @@ pub const Game = struct {
             break :create_window_and_renderer .{ window.?, renderer.? };
         };
 
+        const main_player = try Player.init(allocator, 0.0, 0.0, .{
+            .r = 255,
+            .g = 0,
+            .b = 0,
+            .a = 255,
+        },);
+
+        const state = try State.init(allocator, main_player);
+
         return .{
             .allocator = allocator,
             .window = window,
             .renderer = renderer,
+            .state = state,
         };
     }
 
     pub fn deinit(self: *Game) void {
+        self.state.deinit(self.allocator);
         c.SDL_DestroyWindow(self.window);
         c.SDL_DestroyRenderer(self.renderer);
         c.SDL_Quit();
     }
 
-    pub fn handleEvent(_: *Game, event: *c.SDL_Event) void {
+    pub fn handleEvent(self: *Game, event: *c.SDL_Event) void {
         while (c.SDL_PollEvent(event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => {
                     global_running = false;
                 },
-                c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => {},
+                c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => {
+                    const key_event = event.*.key;
+                    const key_code = key_event.key;
+                    const is_down = key_event.down;
+                    const is_repeat = key_event.repeat;
+
+                    if(is_repeat) {
+                        continue;
+                    }
+
+                    self.state.player.process_input(key_code, is_down);
+                },
                 c.SDL_EVENT_WINDOW_RESIZED => {},
                 else => {},
             }
         }
     }
 
+    pub fn update(self: *Game) void {
+        self.state.player.update_position();
+    }
+
     pub fn render(self: *Game) void {
         _ = c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 255);
         _ = c.SDL_RenderClear(self.renderer);
 
-        _ = c.SDL_SetRenderDrawColor(self.renderer, 255, 0, 0, 255);
         const rect: c.SDL_FRect = .{
             .h = 100.0,
             .w = 100.0,
-            .x = 0.0,
-            .y = 0.0,
+            .x = self.state.player.x,
+            .y = self.state.player.y,
         };
+        _ = c.SDL_SetRenderDrawColor(self.renderer, self.state.player.color.r, self.state.player.color.g, self.state.player.color.b, self.state.player.color.a);
         _ = c.SDL_RenderFillRect(self.renderer, &rect);
 
         _ = c.SDL_RenderPresent(self.renderer);
@@ -104,6 +213,7 @@ pub fn main() !void {
             continue;
         }
 
+        game.update();
         game.render();
 
         const frame_end_time = c.SDL_GetTicks();
