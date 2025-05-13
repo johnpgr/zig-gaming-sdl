@@ -3,13 +3,14 @@ const std = @import("std");
 const c = @cImport({
     @cDefine("SDL_DISABLE_OLD_NAMES", {});
     @cInclude("SDL3/SDL.h");
+    @cInclude("SDL3_ttf/SDL_ttf.h");
+    @cInclude("SDL3_image/SDL_image.h");
 });
 
 const NAME = "unnamed_game";
 const WIDTH = 800;
 const HEIGHT = 600;
 const TARGET_FPS = 60;
-///(milliseconds per frame)
 const TARGET_FRAME_TIME_MS = 1000 / TARGET_FPS;
 const MOVE_SPEED = 5.0;
 
@@ -65,16 +66,16 @@ pub const Player = struct {
     }
 
     pub fn update_position(self: *Player) void {
-        if(self.moving.up) {
+        if (self.moving.up) {
             self.y -= MOVE_SPEED;
         }
-        if(self.moving.down) {
+        if (self.moving.down) {
             self.y += MOVE_SPEED;
         }
-        if(self.moving.left) {
+        if (self.moving.left) {
             self.x -= MOVE_SPEED;
         }
-        if(self.moving.right) {
+        if (self.moving.right) {
             self.x += MOVE_SPEED;
         }
     }
@@ -94,7 +95,6 @@ pub const State = struct {
         self.player.deinit(allocator);
         allocator.destroy(self);
     }
-
 };
 
 pub const Game = struct {
@@ -102,11 +102,21 @@ pub const Game = struct {
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     state: *State,
+    font: *c.TTF_Font,
+    last_elapsed_ms: u64,
 
     pub fn init(allocator: std.mem.Allocator) !Game {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO)) {
             return error.SDL_Init_Failed;
         }
+        if (!c.TTF_Init()) {
+            return error.TTF_Init_Failed;
+        }
+        const font = (c.TTF_OpenFont("assets/home-video-font/HomeVideo-BLG6G.ttf", 24) orelse {
+            const err = c.SDL_GetError();
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_OpenFont failed: %s", err);
+            return error.FontLoadError;
+        });
 
         const window: *c.SDL_Window, const renderer: *c.SDL_Renderer = create_window_and_renderer: {
             var window: ?*c.SDL_Window = null;
@@ -131,7 +141,7 @@ pub const Game = struct {
             .g = 0,
             .b = 0,
             .a = 255,
-        },);
+        });
 
         const state = try State.init(allocator, main_player);
 
@@ -140,6 +150,8 @@ pub const Game = struct {
             .window = window,
             .renderer = renderer,
             .state = state,
+            .font = font,
+            .last_elapsed_ms = 0,
         };
     }
 
@@ -147,6 +159,8 @@ pub const Game = struct {
         self.state.deinit(self.allocator);
         c.SDL_DestroyWindow(self.window);
         c.SDL_DestroyRenderer(self.renderer);
+        c.TTF_CloseFont(self.font);
+        c.TTF_Quit();
         c.SDL_Quit();
     }
 
@@ -162,11 +176,14 @@ pub const Game = struct {
                     const is_down = key_event.down;
                     const is_repeat = key_event.repeat;
 
-                    if(is_repeat) {
+                    if (is_repeat) {
                         continue;
                     }
 
                     self.state.player.process_input(key_code, is_down);
+                    if (key_code == c.SDLK_Q) {
+                        global_running = false;
+                    }
                 },
                 c.SDL_EVENT_WINDOW_RESIZED => {},
                 else => {},
@@ -178,10 +195,7 @@ pub const Game = struct {
         self.state.player.update_position();
     }
 
-    pub fn render(self: *Game) void {
-        _ = c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 255);
-        _ = c.SDL_RenderClear(self.renderer);
-
+    fn render_player(self: *Game) void {
         const rect: c.SDL_FRect = .{
             .h = 100.0,
             .w = 100.0,
@@ -190,7 +204,48 @@ pub const Game = struct {
         };
         _ = c.SDL_SetRenderDrawColor(self.renderer, self.state.player.color.r, self.state.player.color.g, self.state.player.color.b, self.state.player.color.a);
         _ = c.SDL_RenderFillRect(self.renderer, &rect);
+    }
 
+    fn render_fps_text(self: *Game) !void {
+        const fps = if (self.last_elapsed_ms > 0) 1000.0 / @as(f32, @floatFromInt(self.last_elapsed_ms)) else 0.0;
+        var fps_text_buffer: [64]u8 = undefined;
+        const fps_text_slice = try std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps});
+        const text_color = c.SDL_Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        const text_surface = c.TTF_RenderText_Solid(self.font, fps_text_slice.ptr, fps_text_buffer.len, text_color);
+        if (text_surface == null) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_RenderText_Solid failed: %s", c.SDL_GetError());
+            return;
+        }
+
+        defer c.SDL_DestroySurface(text_surface);
+        const text_texture = c.SDL_CreateTextureFromSurface(self.renderer, text_surface);
+        if (text_texture == null) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateTextureFromSurface failed: %s", c.SDL_GetError());
+            return;
+        }
+        defer c.SDL_DestroyTexture(text_texture);
+        var texture_w: f32 = 0;
+        var texture_h: f32 = 0;
+        if (!c.SDL_GetTextureSize(text_texture, &texture_w, &texture_h)) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_GetTextureSize failed: %s", c.SDL_GetError());
+            return;
+        }
+        const text_rect = c.SDL_FRect{
+            .x = 10.0,
+            .y = 10.0,
+            .w = texture_w,
+            .h = texture_h,
+        };
+        _ = c.SDL_RenderTexture(self.renderer, text_texture, null, &text_rect);
+    }
+
+    pub fn render(self: *Game) void {
+        _ = c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 255);
+        _ = c.SDL_RenderClear(self.renderer);
+        self.render_fps_text() catch {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "Failed to render FPS text");
+        };
+        self.render_player();
         _ = c.SDL_RenderPresent(self.renderer);
     }
 };
@@ -218,6 +273,7 @@ pub fn main() !void {
 
         const frame_end_time = c.SDL_GetTicks();
         const elapsed_ms = frame_end_time - frame_start_time;
+        game.last_elapsed_ms = elapsed_ms;
         if (elapsed_ms < TARGET_FRAME_TIME_MS) {
             c.SDL_Delay(@truncate(TARGET_FRAME_TIME_MS - elapsed_ms));
         }
