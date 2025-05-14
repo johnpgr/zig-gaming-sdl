@@ -112,7 +112,7 @@ pub const Game = struct {
         if (!c.TTF_Init()) {
             return error.TTF_Init_Failed;
         }
-        const font = (c.TTF_OpenFont("assets/home-video-font/HomeVideo-BLG6G.ttf", 24) orelse {
+        const font = (c.TTF_OpenFont("assets/RetroGaming.ttf", 24) orelse {
             const err = c.SDL_GetError();
             c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_OpenFont failed: %s", err);
             return error.FontLoadError;
@@ -207,11 +207,17 @@ pub const Game = struct {
     }
 
     fn render_fps_text(self: *Game) !void {
-        const fps = if (self.last_elapsed_ms > 0) 1000.0 / @as(f32, @floatFromInt(self.last_elapsed_ms)) else 0.0;
+        const fps_value: f32 =
+            if (self.last_elapsed_ms == TARGET_FRAME_TIME_MS and 1000 % TARGET_FPS != 0)
+                @as(f32, @floatFromInt(TARGET_FPS))
+            else if (self.last_elapsed_ms > 0)
+                1000.0 / @as(f32, @floatFromInt(self.last_elapsed_ms))
+            else
+                0.0;
         var fps_text_buffer: [64]u8 = undefined;
-        const fps_text_slice = try std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps});
+        const fps_text_slice = try std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps_value});
         const text_color = c.SDL_Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
-        const text_surface = c.TTF_RenderText_Solid(self.font, fps_text_slice.ptr, fps_text_buffer.len, text_color);
+        const text_surface = c.TTF_RenderText_Solid(self.font, fps_text_slice.ptr, fps_text_slice.len, text_color);
         if (text_surface == null) {
             c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_RenderText_Solid failed: %s", c.SDL_GetError());
             return;
@@ -273,9 +279,13 @@ pub fn main() !void {
 
         const frame_end_time = c.SDL_GetTicks();
         const elapsed_ms = frame_end_time - frame_start_time;
-        game.last_elapsed_ms = elapsed_ms;
+        var effective_frame_duration_ms: u64 = 0;
         if (elapsed_ms < TARGET_FRAME_TIME_MS) {
             c.SDL_Delay(@truncate(TARGET_FRAME_TIME_MS - elapsed_ms));
+            effective_frame_duration_ms = TARGET_FRAME_TIME_MS;
+        } else {
+            effective_frame_duration_ms = elapsed_ms;
         }
+        game.last_elapsed_ms = effective_frame_duration_ms;
     }
 }
