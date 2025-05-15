@@ -29,18 +29,20 @@ pub fn build(b: *std.Build) void {
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
-        .name = "zig-sdl-game",
+        .name = "zig-gaming-sdl",
         .root_module = exe_mod,
     });
 
-    exe.root_module.linkSystemLibrary("SDL3", .{});
-    exe.root_module.linkSystemLibrary("SDL3_ttf", .{});
-    exe.root_module.linkSystemLibrary("SDL3_image", .{});
+    exe.linkLibC();
+    exe.linkSystemLibrary("SDL3");
+    exe.linkSystemLibrary("SDL3_ttf");
+    exe.linkSystemLibrary("SDL3_image");
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
