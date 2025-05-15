@@ -136,7 +136,14 @@ pub const Game = struct {
             break :create_window_and_renderer .{ window.?, renderer.? };
         };
 
-        const main_player = try Player.init(allocator, 0.0, 0.0, .{
+        const gpu_device = (c.SDL_CreateGPUDevice(c.SDL_GPU_SHADERFORMAT_SPIRV, true, null) orelse {
+            const err = c.SDL_GetError();
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUDevice failed: %s", err);
+            return error.GPU_Device_Error;
+        });
+        c.SDL_LogInfo(c.SDL_LOG_CATEGORY_APPLICATION, "GPU device created: %s", c.SDL_GetGPUDeviceDriver(gpu_device));
+
+        const main_player = try Player.init(allocator, 200, 200, .{
             .r = 255,
             .g = 0,
             .b = 0,
@@ -202,8 +209,45 @@ pub const Game = struct {
             .x = self.state.player.x,
             .y = self.state.player.y,
         };
-        _ = c.SDL_SetRenderDrawColor(self.renderer, self.state.player.color.r, self.state.player.color.g, self.state.player.color.b, self.state.player.color.a);
+        _ = c.SDL_SetRenderDrawColor(
+            self.renderer,
+            self.state.player.color.r,
+            self.state.player.color.g,
+            self.state.player.color.b,
+            self.state.player.color.a,
+        );
         _ = c.SDL_RenderFillRect(self.renderer, &rect);
+    }
+
+    fn render_text(self: *Game, text: []const u8, x: f32, y: f32, color: c.SDL_Color) !void {
+        const text_surface = c.TTF_RenderText_Solid(self.font, text.ptr, text.len, color);
+        if (text_surface == null) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_RenderText_Solid failed: %s", c.SDL_GetError());
+            return;
+        }
+
+        defer c.SDL_DestroySurface(text_surface);
+        const text_texture = c.SDL_CreateTextureFromSurface(self.renderer, text_surface);
+        if (text_texture == null) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateTextureFromSurface failed: %s", c.SDL_GetError());
+            return;
+        }
+        defer c.SDL_DestroyTexture(text_texture);
+
+        var texture_w: f32 = 0;
+        var texture_h: f32 = 0;
+        if (!c.SDL_GetTextureSize(text_texture, &texture_w, &texture_h)) {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_GetTextureSize failed: %s", c.SDL_GetError());
+            return;
+        }
+
+        const text_rect = c.SDL_FRect{
+            .x = x,
+            .y = y,
+            .w = texture_w,
+            .h = texture_h,
+        };
+        _ = c.SDL_RenderTexture(self.renderer, text_texture, null, &text_rect);
     }
 
     fn render_fps_text(self: *Game) !void {
@@ -217,32 +261,7 @@ pub const Game = struct {
         var fps_text_buffer: [64]u8 = undefined;
         const fps_text_slice = try std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps_value});
         const text_color = c.SDL_Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
-        const text_surface = c.TTF_RenderText_Solid(self.font, fps_text_slice.ptr, fps_text_slice.len, text_color);
-        if (text_surface == null) {
-            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_RenderText_Solid failed: %s", c.SDL_GetError());
-            return;
-        }
-
-        defer c.SDL_DestroySurface(text_surface);
-        const text_texture = c.SDL_CreateTextureFromSurface(self.renderer, text_surface);
-        if (text_texture == null) {
-            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateTextureFromSurface failed: %s", c.SDL_GetError());
-            return;
-        }
-        defer c.SDL_DestroyTexture(text_texture);
-        var texture_w: f32 = 0;
-        var texture_h: f32 = 0;
-        if (!c.SDL_GetTextureSize(text_texture, &texture_w, &texture_h)) {
-            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_GetTextureSize failed: %s", c.SDL_GetError());
-            return;
-        }
-        const text_rect = c.SDL_FRect{
-            .x = 10.0,
-            .y = 10.0,
-            .w = texture_w,
-            .h = texture_h,
-        };
-        _ = c.SDL_RenderTexture(self.renderer, text_texture, null, &text_rect);
+        try self.render_text(fps_text_slice, 10.0, 10.0, text_color);
     }
 
     pub fn render(self: *Game) void {
