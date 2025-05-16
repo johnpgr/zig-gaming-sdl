@@ -13,9 +13,50 @@ const HEIGHT = 600;
 const TARGET_FPS = 60;
 const TARGET_FRAME_TIME_MS = 1000 / TARGET_FPS;
 const MOVE_SPEED = 5.0;
+const AUDIO_FREQUENCY = 44100;
+const AUDIO_FORMAT = c.SDL_AUDIO_F32;
+const AUDIO_CHANNELS = 2;
+const AUDIO_SAMPLES = 4096;
+const TONE_FREQUENCY = 440.0; // A4 note
 
 var global_running: bool = true;
 var global_paused: bool = false;
+var global_audio_state: AudioState = AudioState.init();
+
+const AudioState = struct {
+    sample_nr: usize,
+    playing: bool,
+
+    pub fn init() AudioState {
+        return AudioState{
+            .sample_nr = 0,
+            .playing = false,
+        };
+    }
+};
+
+fn audio_callback(userdata: ?*anyopaque, stream: ?*c.SDL_AudioStream, additional_amount: c_int, total_amount: c_int) callconv(.C) void {
+    _ = userdata;
+    _ = total_amount;
+
+    if (additional_amount > 0 and stream != null) {
+        const num_samples = @as(usize, @intCast(additional_amount));
+        const buf = std.heap.page_allocator.alloc(f32, num_samples) catch return;
+        defer std.heap.page_allocator.free(buf);
+
+        for (buf) |*sample| {
+            if (global_audio_state.playing) {
+                const time = @as(f32, @floatFromInt(global_audio_state.sample_nr)) / AUDIO_FREQUENCY;
+                sample.* = @sin((std.math.pi * 2.0) * TONE_FREQUENCY * time) * 0.25;
+                global_audio_state.sample_nr += 1;
+            } else {
+                sample.* = 0.0;
+            }
+        }
+
+        _ = c.SDL_PutAudioStreamData(stream, @ptrCast(buf.ptr), @intCast(num_samples * @sizeOf(f32)));
+    }
+}
 
 pub const Player = struct {
     x: f32,
@@ -103,6 +144,7 @@ pub const Game = struct {
     renderer: *c.SDL_Renderer,
     state: *State,
     font: *c.TTF_Font,
+    audio_stream: *c.SDL_AudioStream,
     last_elapsed_ms: u64,
 
     pub fn init(allocator: std.mem.Allocator) !Game {
@@ -125,7 +167,7 @@ pub const Game = struct {
                 "Zigmade hero",
                 WIDTH,
                 HEIGHT,
-                c.SDL_WINDOW_RESIZABLE,
+                c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_BORDERLESS,
                 &window,
                 &renderer,
             )) {
@@ -136,12 +178,24 @@ pub const Game = struct {
             break :create_window_and_renderer .{ window.?, renderer.? };
         };
 
-        const gpu_device = (c.SDL_CreateGPUDevice(c.SDL_GPU_SHADERFORMAT_SPIRV, true, null) orelse {
-            const err = c.SDL_GetError();
-            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateGPUDevice failed: %s", err);
-            return error.GPU_Device_Error;
-        });
-        c.SDL_LogInfo(c.SDL_LOG_CATEGORY_APPLICATION, "GPU device created: %s", c.SDL_GetGPUDeviceDriver(gpu_device));
+        const audio_spec = c.SDL_AudioSpec{
+            .freq = AUDIO_FREQUENCY,
+            .format = AUDIO_FORMAT,
+            .channels = AUDIO_CHANNELS,
+        };
+
+        const audio_stream = c.SDL_OpenAudioDeviceStream(
+            c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+            &audio_spec,
+            audio_callback,
+            null,
+        ) orelse {
+            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "Failed to open audio stream: %s", c.SDL_GetError());
+            return error.AudioStreamOpenFailed;
+        };
+
+        const audio_device = c.SDL_GetAudioStreamDevice(audio_stream);
+        _ = c.SDL_ResumeAudioDevice(audio_device);
 
         const main_player = try Player.init(allocator, 200, 200, .{
             .r = 255,
@@ -158,12 +212,14 @@ pub const Game = struct {
             .renderer = renderer,
             .state = state,
             .font = font,
+            .audio_stream = audio_stream,
             .last_elapsed_ms = 0,
         };
     }
 
     pub fn deinit(self: *Game) void {
         self.state.deinit(self.allocator);
+        c.SDL_DestroyAudioStream(self.audio_stream);
         c.SDL_DestroyWindow(self.window);
         c.SDL_DestroyRenderer(self.renderer);
         c.TTF_CloseFont(self.font);
@@ -188,8 +244,17 @@ pub const Game = struct {
                     }
 
                     self.state.player.process_input(key_code, is_down);
-                    if (key_code == c.SDLK_Q) {
-                        global_running = false;
+
+                    switch (key_code) {
+                        c.SDLK_Q => {
+                            global_running = false;
+                        },
+                        c.SDLK_T => {
+                            if(is_down) {
+                                global_audio_state.playing = !global_audio_state.playing;
+                            }
+                        },
+                        else => {},
                     }
                 },
                 c.SDL_EVENT_WINDOW_RESIZED => {},
@@ -219,7 +284,7 @@ pub const Game = struct {
         _ = c.SDL_RenderFillRect(self.renderer, &rect);
     }
 
-    fn render_text(self: *Game, text: []const u8, x: f32, y: f32, color: c.SDL_Color) !void {
+    fn render_text(self: *Game, text: []const u8, x: f32, y: f32, color: c.SDL_Color) void {
         const text_surface = c.TTF_RenderText_Solid(self.font, text.ptr, text.len, color);
         if (text_surface == null) {
             c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "TTF_RenderText_Solid failed: %s", c.SDL_GetError());
@@ -250,7 +315,7 @@ pub const Game = struct {
         _ = c.SDL_RenderTexture(self.renderer, text_texture, null, &text_rect);
     }
 
-    fn render_fps_text(self: *Game) !void {
+    fn render_fps_text(self: *Game) void {
         const fps_value: f32 =
             if (self.last_elapsed_ms == TARGET_FRAME_TIME_MS and 1000 % TARGET_FPS != 0)
                 @as(f32, @floatFromInt(TARGET_FPS))
@@ -259,18 +324,16 @@ pub const Game = struct {
             else
                 0.0;
         var fps_text_buffer: [64]u8 = undefined;
-        const fps_text_slice = try std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps_value});
+        const fps_text_slice = std.fmt.bufPrintZ(&fps_text_buffer, "FPS: {d:.0}", .{fps_value}) catch "";
         const text_color = c.SDL_Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
-        try self.render_text(fps_text_slice, 10.0, 10.0, text_color);
+        self.render_text(fps_text_slice, 10.0, 10.0, text_color);
     }
 
     pub fn render(self: *Game) void {
         _ = c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 255);
         _ = c.SDL_RenderClear(self.renderer);
-        self.render_fps_text() catch {
-            c.SDL_LogError(c.SDL_LOG_CATEGORY_APPLICATION, "Failed to render FPS text");
-        };
         self.render_player();
+        self.render_fps_text();
         _ = c.SDL_RenderPresent(self.renderer);
     }
 };
